@@ -72,7 +72,7 @@ def run_on_image(model: ALike, path: str, nfeatures: int):
     vis = img.copy()   # ← визуализация на ОРИГИНАЛЬНОМ кадре
     print(f"[IMAGE] ORB keypoints: {len(coords)}")
 
-    HEATMAP_TH = 0.8
+    HEATMAP_TH = 0.05
     H, W = score_np.shape
     filtered_coords = []
 
@@ -123,7 +123,7 @@ def run_on_video(model: ALike, path: str, nfeatures: int):
         coords, kps, desc = extract_orb_keypoints(frame, nfeatures=nfeatures)
         vis = frame.copy()   # ← визуализация на ОРИГИНАЛЬНОМ кадре
 
-        HEATMAP_TH = 0.002
+        HEATMAP_TH = 0.05
         H, W = score_np.shape
         filtered_coords = []
 
@@ -186,3 +186,4 @@ if __name__ == "__main__":
         run_on_image(model, path, nfeatures=args.nfeatures)
     else:
         run_on_video(model, path, nfeatures=args.nfeatures)
+
