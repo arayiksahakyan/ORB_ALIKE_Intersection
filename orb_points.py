@@ -42,7 +42,7 @@ def extract_orb_keypoints(
 
 if __name__ == "__main__":
     # Small test: run ORB on an image and show result
-    img_path = "testvd.mp4"
+    img_path = "Test1.jpg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit(f"Cannot read image: {img_path}")
