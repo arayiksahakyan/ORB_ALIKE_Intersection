@@ -105,43 +105,41 @@ def run_on_video(model: ALike, path: str, nfeatures: int):
 
     logging.info("Press 'q' to quit video")
 
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    cv2.namedWindow("ALike heatmap + ORB (video)", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("ALike heatmap + ORB (video)", w, h)
+
     while True:
         ret, frame = cap.read()
         if not ret:
             logging.info("End of video or cannot read frame")
             break
 
-        # ALike heatmap
         inp = tensor_from_bgr(frame).to(model.device)
         dense = model.extract_dense_map(inp, ret_dict=True)
         score_map = dense['score_map']
-        
+
         score_np = score_map[0, 0].detach().cpu().numpy()
         heatmap = to_heatmap(score_map)
 
-        # ORB keypoints
         coords, kps, desc = extract_orb_keypoints(frame, nfeatures=nfeatures)
-        vis = frame.copy()   # ← визуализация на ОРИГИНАЛЬНОМ кадре
+        vis = frame.copy()
 
         HEATMAP_TH = 0.05
         H, W = score_np.shape
         filtered_coords = []
 
-        # 🔴 все ORB
         for (x, y) in coords:
             cv2.circle(vis, (int(x), int(y)), 2, (0, 0, 255), -1)
 
-        # 🟢 ORB ∩ ALike
         for (x, y) in coords:
             xi, yi = int(x), int(y)
             if 0 <= xi < W and 0 <= yi < H:
                 if score_np[yi, xi] >= HEATMAP_TH:
                     filtered_coords.append((xi, yi))
                     cv2.circle(vis, (xi, yi), 2, (0, 255, 0), -1)
-        
-        
-        print(f"ORB total: {len(coords)}")
-        print(f"ORB ∩ ALike: {len(filtered_coords)}")
 
         cv2.imshow("ALike heatmap + ORB (video)", vis)
 
@@ -150,9 +148,6 @@ def run_on_video(model: ALike, path: str, nfeatures: int):
 
     cap.release()
     cv2.destroyAllWindows()
-
-
-# ---------- helpers ----------
 
 def is_image_file(path: str) -> bool:
     ext = os.path.splitext(path)[1].lower()
