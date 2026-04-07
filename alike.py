@@ -26,17 +26,16 @@ configs = {
 
 
 class ALike(ALNet):
-    def __init__(self,
-                 # ================================== feature encoder
-                 c1: int = 32, c2: int = 64, c3: int = 128, c4: int = 128, dim: int = 128,
-                 single_head: bool = False,
-                 # ================================== detect parameters
-                 radius: int = 2,
-                 top_k: int = 500, scores_th: float = 0.5,
-                 n_limit: int = 5000,
-                 device: str = 'cpu',
-                 model_path: str = ''
-                 ):
+    def __init__(
+        self,
+        c1: int = 32, c2: int = 64, c3: int = 128, c4: int = 128, dim: int = 128,
+        single_head: bool = False,
+        radius: int = 2,
+        top_k: int = 500, scores_th: float = 0.5,
+        n_limit: int = 5000,
+        device: str = 'cpu',
+        model_path: str = ''
+    ):
         super().__init__(c1, c2, c3, c4, dim, single_head)
         self.radius = radius
         self.top_k = top_k
@@ -45,59 +44,47 @@ class ALike(ALNet):
         self.dkd = DKD(radius=self.radius, top_k=self.top_k,
                        scores_th=self.scores_th, n_limit=self.n_limit)
 
-        # force CPU
-        self.device = torch.device('cpu')
+        self.device = torch.device(device)
 
         if model_path != '':
             state_dict = torch.load(model_path, map_location=self.device)
             self.load_state_dict(state_dict)
-            # Remove self.to(self.device) → model is already on CPU
-            # self.to(self.device)
+            self.to(self.device)
             self.eval()
             logging.info(f'Loaded model parameters from {model_path}')
             logging.info(
-                f"Number of model parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad) / 1e3}KB")
+                f"Number of model parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad) / 1e3}KB"
+            )
+
     def extract_dense_map(self, image, ret_dict=False):
-        """
-        Expects `image` as a torch tensor with shape (B, C, H, W).
-        Returns score_map only, cropped to original HxW.
-        """
-        # make sure image is on the model device (we force CPU in __init__)
         image = image.to(self.device)
 
         b, c, h, w = image.shape
-        # make sizes multiples of 32 (ALNet internal stride)
         h_ = math.ceil(h / 32) * 32 if h % 32 != 0 else h
         w_ = math.ceil(w / 32) * 32 if w % 32 != 0 else w
 
-        # pad if needed
         if h_ != h or w_ != w:
-            img_pad = torch.zeros(b, c, h_, w_, device=self.device)
+            img_pad = torch.zeros(b, c, h_, w_, device=self.device, dtype=image.dtype)
             img_pad[:, :, :h, :w] = image
             image = img_pad
 
-        # forward through ALNet to get score map (ignore descriptor)
         with torch.no_grad():
-            score_map, _ = super().forward(image)  # score_map shape: (B,1,H_,W_)
+            score_map, descriptor_map = super().forward(image)
 
-        # crop back to original size
-        score_map = score_map[:, :, :h, :w]  # (B,1,H,W)
+        score_map = score_map[:, :, :h, :w]
+        descriptor_map = descriptor_map[:, :, :h, :w]
 
         if ret_dict:
-            return {'score_map': score_map}
+            return {
+                "score_map": score_map,
+                "descriptor_map": descriptor_map
+            }
 
-        return score_map
+        return score_map, descriptor_map
 
-
-        def forward(self, image):
-            """
-            Forward pass for ONNX export.
-            image: tensor (B,3,H,W)
-            returns score_map: (B,1,H,W)
-            """
-            score_map, _ = super().forward(image)
-            return score_map
-
+    def forward(self, image):
+        out = self.extract_dense_map(image, ret_dict=True)
+        return out["score_map"]
 
 if __name__ == '__main__':
     import numpy as np
