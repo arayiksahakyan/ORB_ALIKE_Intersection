@@ -9,11 +9,25 @@ import numpy as np
 from onnx_pipeline import ALikeORB_BEBLID_ONNX
 
 
-def tensor_from_bgr(img_bgr: np.ndarray) -> torch.Tensor:
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = torch.device(name)
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        logging.warning(
+            "CUDA requested (%s) but torch.cuda.is_available() is False "
+            "(CPU-only PyTorch, missing driver, etc.); using CPU.",
+            name,
+        )
+        return torch.device("cpu")
+    return dev
+
+
+def tensor_from_bgr(img_bgr: np.ndarray, device: torch.device) -> torch.Tensor:
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     x = torch.from_numpy(img_rgb).float() / 255.0
     x = x.permute(2, 0, 1).unsqueeze(0)
-    return x
+    return x.to(device, non_blocking=device.type == "cuda")
 
 
 def heatmap_to_bgr(heatmap: torch.Tensor) -> np.ndarray:
@@ -72,12 +86,12 @@ def print_info(heatmap: torch.Tensor, keypoints: torch.Tensor, scores: torch.Ten
     print("descriptors shape:", tuple(descriptors.shape))
 
 
-def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool):
+def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, device: torch.device):
     img = cv2.imread(path)
     if img is None:
         raise SystemExit(f"Cannot read image: {path}")
 
-    x = tensor_from_bgr(img)
+    x = tensor_from_bgr(img, device)
 
     with torch.no_grad():
         heatmap, keypoints, scores, descriptors = model(x)
@@ -100,7 +114,7 @@ def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool):
     cv2.destroyAllWindows()
 
 
-def run_on_video(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool):
+def run_on_video(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, device: torch.device):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise SystemExit(f"Cannot open video: {path}")
@@ -130,7 +144,7 @@ def run_on_video(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool):
             logging.info("End of video or cannot read frame")
             break
 
-        x = tensor_from_bgr(frame)
+        x = tensor_from_bgr(frame, device)
 
         with torch.no_grad():
             heatmap, keypoints, scores, descriptors = model(x)
@@ -164,14 +178,15 @@ def is_image_file(path: str) -> bool:
     return ext in [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".ppm", ".webp"]
 
 
-def build_model(args):
+def build_model(args, device: torch.device):
     model = ALikeORB_BEBLID_ONNX(
         model_name=args.model,
         max_keypoints=args.max_keypoints,
         score_threshold=args.score_threshold,
         nms_kernel=args.nms_kernel,
         patch_size=args.patch_size,
-        num_bits=args.num_bits
+        num_bits=args.num_bits,
+        device=str(device),
     ).eval()
 
     return model
@@ -190,6 +205,12 @@ if __name__ == "__main__":
     parser.add_argument("--patch_size", type=int, default=31)
     parser.add_argument("--num_bits", type=int, default=256)
     parser.add_argument("--show_heatmap", action="store_true")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="auto: use CUDA if available, else CPU; or e.g. cpu, cuda, cuda:0",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -197,9 +218,15 @@ if __name__ == "__main__":
     if not os.path.exists(args.input):
         raise SystemExit(f"Input path does not exist: {args.input}")
 
-    model = build_model(args)
+    device = resolve_device(args.device)
+    if args.device == "auto":
+        logging.info("Using device: %s (auto)", device)
+    else:
+        logging.info("Using device: %s", device)
+
+    model = build_model(args, device)
 
     if is_image_file(args.input):
-        run_on_image(model, args.input, args.show_heatmap)
+        run_on_image(model, args.input, args.show_heatmap, device)
     else:
-        run_on_video(model, args.input, args.show_heatmap)
+        run_on_video(model, args.input, args.show_heatmap, device)

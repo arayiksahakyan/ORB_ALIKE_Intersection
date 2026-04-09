@@ -47,7 +47,9 @@ class ALike(ALNet):
         self.device = torch.device(device)
 
         if model_path != '':
-            state_dict = torch.load(model_path, map_location=self.device)
+            # Load on CPU first so unpickling works when CUDA is requested but unavailable
+            # or when moving from a GPU checkpoint on a CPU-only machine.
+            state_dict = torch.load(model_path, map_location="cpu")
             self.load_state_dict(state_dict)
             self.to(self.device)
             self.eval()

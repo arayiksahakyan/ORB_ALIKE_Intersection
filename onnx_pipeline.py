@@ -14,12 +14,14 @@ class ALikeORB_BEBLID_ONNX(nn.Module):
         score_threshold: float = 0.05,
         nms_kernel: int = 5,
         patch_size: int = 31,
-        num_bits: int = 256
+        num_bits: int = 256,
+        device: str = "cpu",
     ):
         super().__init__()
 
+        dev = torch.device(device)
         cfg = configs[model_name].copy()
-        cfg["device"] = "cpu"
+        cfg["device"] = str(dev)
 
         self.alike = ALike(**cfg).eval()
         self.orb = TorchORBDetector(
@@ -31,6 +33,7 @@ class ALikeORB_BEBLID_ONNX(nn.Module):
             patch_size=patch_size,
             num_bits=num_bits
         )
+        self.to(dev)
 
     def forward(self, image: torch.Tensor):
         heatmap = self.alike(image)

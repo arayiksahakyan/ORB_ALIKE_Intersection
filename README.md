@@ -35,6 +35,8 @@ python demo_torch_pipeline.py path/to/image.jpg --model alike-t --show_heatmap
 python demo_torch_pipeline.py path/to/video.mp4 --max_keypoints 500
 ```
 
+By default `--device auto` uses CUDA when available (otherwise CPU). Use `--device cuda` only when `torch.cuda.is_available()` is true (see `python -c "import torch; print(torch.cuda.is_available())"`); otherwise the demo falls back to CPU with a warning. Force CPU with `--device cpu`.
+
 Options include `--model` (`alike-t` … `alike-l`), `--max_keypoints`, `--score_threshold`, `--nms_kernel`, `--patch_size`, `--num_bits` (256 only in the current BEBLID module).
 
 ## ONNX export
