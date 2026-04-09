@@ -10,7 +10,7 @@ def draw_keypoints_radius1(image, keypoints, color=(0, 255, 0), radius=1, thickn
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 orb_run_radius1.py <image>")
+        print("Usage: python3 orb_run.py <image>")
         sys.exit(1)
 
     img_path = sys.argv[1]
