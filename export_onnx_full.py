@@ -18,10 +18,7 @@ def export_to_onnx(
 
     dummy_input = torch.randn(1, 3, height, width, dtype=torch.float32)
 
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
+    export_kw = dict(
         export_params=True,
         opset_version=16,
         do_constant_folding=True,
@@ -35,6 +32,13 @@ def export_to_onnx(
             "descriptors": {0: "batch", 1: "num_keypoints"},
         },
     )
+    # PyTorch 2.x defaults to dynamo exporter; this model exports reliably with the legacy path.
+    try:
+        torch.onnx.export(
+            model, dummy_input, onnx_path, **export_kw, dynamo=False
+        )
+    except TypeError:
+        torch.onnx.export(model, dummy_input, onnx_path, **export_kw)
 
     print(f"Exported ONNX model saved to: {onnx_path}")
 

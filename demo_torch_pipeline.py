@@ -6,7 +6,78 @@ import argparse
 import logging
 import numpy as np
 
+from descriptor_match import (
+    draw_matches_side_by_side,
+    draw_tracks_on_current_frame,
+    mutual_nearest_neighbors_hamming,
+)
 from onnx_pipeline import ALikeORB_BEBLID_ONNX
+
+
+def diversify_scores_for_viz(
+    keypoints: np.ndarray, scores: np.ndarray, min_dist_px: float
+) -> np.ndarray:
+    if min_dist_px <= 0:
+        return scores
+    xy = keypoints[0]
+    s = scores[0]
+    order = np.argsort(-s)
+    keep = np.zeros(len(s), dtype=bool)
+    picked = []
+    d2 = min_dist_px * min_dist_px
+    for i in order:
+        if s[i] <= 0:
+            continue
+        x, y = float(xy[i, 0]), float(xy[i, 1])
+        bad = False
+        for px, py in picked:
+            dx, dy = x - px, y - py
+            if dx * dx + dy * dy < d2:
+                bad = True
+                break
+        if not bad:
+            keep[i] = True
+            picked.append((x, y))
+    out = scores.copy()
+    out[0, ~keep] = 0.0
+    return out
+
+
+def diversify_column_cap(
+    keypoints: np.ndarray, scores: np.ndarray, max_per_x: int
+) -> np.ndarray:
+    if max_per_x <= 0:
+        return scores
+    xy = keypoints[0]
+    s = scores[0]
+    order = np.argsort(-s)
+    keep = np.zeros(len(s), dtype=bool)
+    per_x: dict[int, int] = {}
+    for i in order:
+        if s[i] <= 0:
+            continue
+        xi = int(round(xy[i, 0]))
+        c = per_x.get(xi, 0)
+        if c >= max_per_x:
+            continue
+        keep[i] = True
+        per_x[xi] = c + 1
+    out = scores.copy()
+    out[0, ~keep] = 0.0
+    return out
+
+
+def apply_viz_diversification(
+    keypoints: np.ndarray,
+    scores: np.ndarray,
+    min_dist_px: float,
+    max_per_x_column: int,
+) -> np.ndarray:
+    if max_per_x_column > 0:
+        return diversify_column_cap(keypoints, scores, max_per_x_column)
+    if min_dist_px > 0:
+        return diversify_scores_for_viz(keypoints, scores, min_dist_px)
+    return scores
 
 
 def resolve_device(name: str) -> torch.device:
@@ -50,13 +121,13 @@ def draw_keypoints(img_bgr: np.ndarray, keypoints: torch.Tensor, scores: torch.T
     h, w = vis.shape[:2]
 
     for i, pt in enumerate(kp):
+        if sc is not None and sc[i] <= 0:
+            continue
         x, y = int(round(pt[0])), int(round(pt[1]))
 
-        if 0 <= x < w and 0 <= y < h:
-            if sc is not None:
-                r = 2 if sc[i] <= 0 else 3
-            else:
-                r = 2
+        r = 3 if sc is not None else 2
+        # Avoid clipped circles on edges (esp. y=0) merging into a horizontal green band.
+        if r <= x < w - r and r <= y < h - r:
             cv2.circle(vis, (x, y), r, (0, 255, 0), -1)
 
     return vis
@@ -86,7 +157,58 @@ def print_info(heatmap: torch.Tensor, keypoints: torch.Tensor, scores: torch.Ten
     print("descriptors shape:", tuple(descriptors.shape))
 
 
-def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, device: torch.device):
+def run_match_two_images(
+    model: ALikeORB_BEBLID_ONNX,
+    path_a: str,
+    path_b: str,
+    device: torch.device,
+    max_hamming: int,
+) -> None:
+    img_a = cv2.imread(path_a)
+    img_b = cv2.imread(path_b)
+    if img_a is None:
+        raise SystemExit(f"Cannot read image: {path_a}")
+    if img_b is None:
+        raise SystemExit(f"Cannot read image: {path_b}")
+
+    xa = tensor_from_bgr(img_a, device)
+    xb = tensor_from_bgr(img_b, device)
+
+    with torch.no_grad():
+        _, kp_a, sc_a, desc_a = model(xa)
+        _, kp_b, sc_b, desc_b = model(xb)
+
+    kp_an = kp_a.detach().cpu().numpy()
+    kp_bn = kp_b.detach().cpu().numpy()
+    sc_an = sc_a.detach().cpu().numpy()
+    sc_bn = sc_b.detach().cpu().numpy()
+    desc_an = desc_a.detach().cpu().numpy()
+    desc_bn = desc_b.detach().cpu().numpy()
+
+    matches = mutual_nearest_neighbors_hamming(
+        desc_an, desc_bn, sc_an, sc_bn, max_hamming=max_hamming
+    )
+    logging.info(
+        "Mutual nearest-neighbor matches: %d (max Hamming=%d)",
+        len(matches),
+        max_hamming,
+    )
+
+    vis = draw_matches_side_by_side(img_a, img_b, kp_an, kp_bn, matches)
+    cv2.namedWindow("Torch pipeline: descriptor matches", cv2.WINDOW_NORMAL)
+    cv2.imshow("Torch pipeline: descriptor matches", vis)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def run_on_image(
+    model: ALikeORB_BEBLID_ONNX,
+    path: str,
+    show_heatmap: bool,
+    device: torch.device,
+    viz_min_dist: float = 0.0,
+    viz_max_per_x_column: int = 0,
+):
     img = cv2.imread(path)
     if img is None:
         raise SystemExit(f"Cannot read image: {path}")
@@ -98,7 +220,13 @@ def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, dev
 
     print_info(heatmap, keypoints, scores, descriptors)
 
-    vis_kp = draw_keypoints(img, keypoints, scores)
+    kp_np = keypoints.detach().cpu().numpy()
+    sc_np = scores.detach().cpu().numpy()
+    sc_np = apply_viz_diversification(
+        kp_np, sc_np, viz_min_dist, viz_max_per_x_column
+    )
+    sc_vis = torch.from_numpy(sc_np).to(device)
+    vis_kp = draw_keypoints(img, keypoints, sc_vis)
 
     if show_heatmap:
         heatmap_bgr = heatmap_to_bgr(heatmap)
@@ -114,7 +242,75 @@ def run_on_image(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, dev
     cv2.destroyAllWindows()
 
 
-def run_on_video(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, device: torch.device):
+def run_video_match_tracking(
+    model: ALikeORB_BEBLID_ONNX,
+    path: str,
+    device: torch.device,
+    max_hamming: int,
+) -> None:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise SystemExit(f"Cannot open video: {path}")
+
+    logging.info(
+        "Video tracking: prev↔curr mutual NN (Hamming). Cyan: track; orange: prev; green: curr. q=quit"
+    )
+
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    win = "Torch pipeline: video tracks (prev→curr)"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, fw, fh)
+
+    prev_kp = prev_sc = prev_desc = None
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            logging.info("End of video or cannot read frame")
+            break
+
+        x = tensor_from_bgr(frame, device)
+        with torch.no_grad():
+            _hm, kp, sc, desc = model(x)
+
+        kp_np = kp.detach().cpu().numpy()
+        sc_np = sc.detach().cpu().numpy()
+        desc_np = desc.detach().cpu().numpy()
+
+        if prev_desc is not None:
+            matches = mutual_nearest_neighbors_hamming(
+                prev_desc, desc_np, prev_sc, sc_np, max_hamming=max_hamming
+            )
+            vis = draw_tracks_on_current_frame(frame, prev_kp, kp_np, matches)
+            if frame_idx % 15 == 0:
+                logging.info("frame %d: MNN matches %d", frame_idx, len(matches))
+        else:
+            vis = draw_keypoints(frame, kp, sc)
+
+        prev_kp = np.copy(kp_np)
+        prev_sc = np.copy(sc_np)
+        prev_desc = np.copy(desc_np)
+
+        cv2.imshow(win, vis)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+        frame_idx += 1
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+def run_on_video(
+    model: ALikeORB_BEBLID_ONNX,
+    path: str,
+    show_heatmap: bool,
+    device: torch.device,
+    viz_min_dist: float = 0.0,
+    viz_max_per_x_column: int = 0,
+):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise SystemExit(f"Cannot open video: {path}")
@@ -153,7 +349,13 @@ def run_on_video(model: ALikeORB_BEBLID_ONNX, path: str, show_heatmap: bool, dev
             print(f"\nframe {frame_idx}")
             print_info(heatmap, keypoints, scores, descriptors)
 
-        vis_kp = draw_keypoints(frame, keypoints, scores)
+        kp_np = keypoints.detach().cpu().numpy()
+        sc_np = scores.detach().cpu().numpy()
+        sc_np = apply_viz_diversification(
+            kp_np, sc_np, viz_min_dist, viz_max_per_x_column
+        )
+        sc_vis = torch.from_numpy(sc_np).to(device)
+        vis_kp = draw_keypoints(frame, keypoints, sc_vis)
 
         if show_heatmap:
             heatmap_bgr = heatmap_to_bgr(heatmap)
@@ -211,6 +413,38 @@ if __name__ == "__main__":
         default="auto",
         help="auto: use CUDA if available, else CPU; or e.g. cpu, cuda, cuda:0",
     )
+    parser.add_argument(
+        "--viz-min-dist",
+        type=float,
+        default=0.0,
+        metavar="PX",
+        help="visualization: greedy min spacing (large PX leaves few points; see --viz-max-per-x-column)",
+    )
+    parser.add_argument(
+        "--viz-max-per-x-column",
+        type=int,
+        default=0,
+        metavar="N",
+        help="visualization: max keypoints per integer x; overrides --viz-min-dist when >0",
+    )
+    parser.add_argument(
+        "--match",
+        type=str,
+        default="",
+        metavar="IMAGE",
+        help="second image for descriptor matching (mutual NN, Hamming); main input must be an image",
+    )
+    parser.add_argument(
+        "--max-hamming",
+        type=int,
+        default=80,
+        help="max Hamming distance for a mutual NN pair (0–256)",
+    )
+    parser.add_argument(
+        "--no-track-matches",
+        action="store_true",
+        help="video only: keypoints/heatmap only, no frame-to-frame descriptor matching (default video: tracks on)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -226,7 +460,42 @@ if __name__ == "__main__":
 
     model = build_model(args, device)
 
-    if is_image_file(args.input):
-        run_on_image(model, args.input, args.show_heatmap, device)
+    if args.match:
+        if not is_image_file(args.input):
+            raise SystemExit("--match requires the main input to be an image, not video")
+        if not is_image_file(args.match):
+            raise SystemExit("--match must be an image path")
+        if not os.path.isfile(args.match):
+            raise SystemExit(f"--match file not found: {args.match}")
+        run_match_two_images(
+            model,
+            args.input,
+            args.match,
+            device,
+            max_hamming=args.max_hamming,
+        )
+    elif is_image_file(args.input):
+        run_on_image(
+            model,
+            args.input,
+            args.show_heatmap,
+            device,
+            viz_min_dist=args.viz_min_dist,
+            viz_max_per_x_column=args.viz_max_per_x_column,
+        )
+    elif args.no_track_matches:
+        run_on_video(
+            model,
+            args.input,
+            args.show_heatmap,
+            device,
+            viz_min_dist=args.viz_min_dist,
+            viz_max_per_x_column=args.viz_max_per_x_column,
+        )
     else:
-        run_on_video(model, args.input, args.show_heatmap, device)
+        run_video_match_tracking(
+            model,
+            args.input,
+            device,
+            max_hamming=args.max_hamming,
+        )

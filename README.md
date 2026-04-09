@@ -39,6 +39,8 @@ By default `--device auto` uses CUDA when available (otherwise CPU). Use `--devi
 
 Options include `--model` (`alike-t` … `alike-l`), `--max_keypoints`, `--score_threshold`, `--nms_kernel`, `--patch_size`, `--num_bits` (256 only in the current BEBLID module).
 
+**Descriptor matching:** Two images: `python demo_torch_pipeline.py img_a.jpg --match img_b.jpg` (mutual NN, Hamming; `--max-hamming` default 80). **Video:** consecutive-frame matching is **on by default** (prev→curr tracks). Use `--no-track-matches` for keypoints/heatmap-only playback. See `descriptor_match.py`.
+
 ## ONNX export
 
 - **Heatmap only (ALike):** `export_onnx.py` → default `alike_heatmap.onnx`, opset 12, dynamic batch and spatial size.
@@ -49,6 +51,19 @@ python export_onnx.py
 python export_onnx_full.py
 ```
 
+## Full pipeline via ONNX (`demo_full_onnx.py`)
+
+After `python export_onnx_full.py` (produces `alike_orb_beblid.onnx` by default), run inference with **ONNX Runtime** only (no PyTorch at runtime):
+
+```bash
+python demo_full_onnx.py path/to/image.jpg --show_heatmap
+python demo_full_onnx.py path/to/video.mp4 --onnx alike_orb_beblid.onnx
+```
+
+Frames are resized to **480×640** (defaults; match your export) and outputs are scaled back for visualization. Use `--cpu` to force the CPU execution provider; otherwise CUDA is used when `onnxruntime-gpu` is installed and the EP is available. Two-image matching: `python demo_full_onnx.py a.jpg --match b.jpg` (optional `--max-hamming`). **Video:** `python demo_full_onnx.py clip.mp4` runs consecutive-frame matching by default (tracks on current frame). **`--no-track-matches`** disables that. Same on `demo_torch_pipeline.py`.
+
+**Vertical “dotted columns”:** Global top‑500 on `Harris × heatmap` after NMS can concentrate on a few strong vertical ridges (often at ~⅕ of the internal width on 640-wide maps), ~100 peaks per column from NMS spacing along **y**—not a drawing bug. For visualization only: **`--viz-max-per-x-column 100`** keeps up to 100 points per integer **x** (so you can still show ~500 if five rails). Large **`--viz-min-dist`** removes many dots; prefer a column cap or small min-dist (e.g. 4). Same options exist on `demo_torch_pipeline.py`.
+
 ## Other scripts
 
 | Script | Role |
@@ -56,6 +71,8 @@ python export_onnx_full.py
 | `orb_run.py` | OpenCV ORB baseline on one image (visualize keypoints). |
 | `demo.py` | ALike-focused demo (camera / video / image folder; see argparse in file). |
 | `onnx_pipeline.py` | `ALikeORB_BEBLID_ONNX` module used by demos and export. |
+| `demo_full_onnx.py` | Same full pipeline using exported ONNX + ONNX Runtime (no PyTorch inference). |
+| `descriptor_match.py` | Hamming distance + mutual NN matching + side-by-side match drawing. |
 | `hseq/extract.py`, `hseq/eval.py` | HPatches-style extraction / evaluation scaffolding (expects dataset paths as configured in those files). |
 
 Heatmap / descriptor analysis utilities: `demo_heatmap.py`, `graph_heatmap.py`, `reproj_error_heatmap.py`, etc.
