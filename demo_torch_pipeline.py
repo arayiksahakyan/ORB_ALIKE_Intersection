@@ -157,6 +157,76 @@ def print_info(heatmap: torch.Tensor, keypoints: torch.Tensor, scores: torch.Ten
     print("descriptors shape:", tuple(descriptors.shape))
 
 
+def read_frame_from_video(path: str, frame_idx: int) -> np.ndarray:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise SystemExit(f"Cannot open video: {path}")
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if frame_idx < 0:
+        cap.release()
+        raise SystemExit(f"Frame index must be >= 0, got {frame_idx}")
+    if frame_count > 0 and frame_idx >= frame_count:
+        cap.release()
+        raise SystemExit(
+            f"Frame index {frame_idx} is out of range for video with {frame_count} frames"
+        )
+
+    ok = cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    if not ok:
+        logging.warning("Could not seek directly to frame %d; trying read anyway", frame_idx)
+
+    ret, frame = cap.read()
+    cap.release()
+    if not ret or frame is None:
+        raise SystemExit(f"Cannot read frame {frame_idx} from video: {path}")
+    return frame
+
+
+def run_match_two_video_frames(
+    model: ALikeORB_BEBLID_ONNX,
+    path: str,
+    frame_a: int,
+    frame_b: int,
+    device: torch.device,
+    max_hamming: int,
+) -> None:
+    img_a = read_frame_from_video(path, frame_a)
+    img_b = read_frame_from_video(path, frame_b)
+
+    xa = tensor_from_bgr(img_a, device)
+    xb = tensor_from_bgr(img_b, device)
+
+    with torch.no_grad():
+        _, kp_a, sc_a, desc_a = model(xa)
+        _, kp_b, sc_b, desc_b = model(xb)
+
+    kp_an = kp_a.detach().cpu().numpy()
+    kp_bn = kp_b.detach().cpu().numpy()
+    sc_an = sc_a.detach().cpu().numpy()
+    sc_bn = sc_b.detach().cpu().numpy()
+    desc_an = desc_a.detach().cpu().numpy()
+    desc_bn = desc_b.detach().cpu().numpy()
+
+    matches = mutual_nearest_neighbors_hamming(
+        desc_an, desc_bn, sc_an, sc_bn, max_hamming=max_hamming
+    )
+    logging.info(
+        "Video frame match: frame %d vs frame %d -> %d mutual matches (max Hamming=%d)",
+        frame_a,
+        frame_b,
+        len(matches),
+        max_hamming,
+    )
+
+    vis = draw_matches_side_by_side(img_a, img_b, kp_an, kp_bn, matches)
+    win = f"Torch pipeline: frame {frame_a} vs frame {frame_b}"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.imshow(win, vis)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
 def run_match_two_images(
     model: ALikeORB_BEBLID_ONNX,
     path_a: str,
@@ -247,6 +317,9 @@ def run_video_match_tracking(
     path: str,
     device: torch.device,
     max_hamming: int,
+    output_video: str | None = None,
+    save_frames: set[int] | None = None,
+    frames_dir: str | None = None,
 ) -> None:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -258,6 +331,13 @@ def run_video_match_tracking(
 
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25.0
+
+    writer = None
+    save_frames = save_frames or set()
+
     win = "Torch pipeline: video tracks (prev→curr)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, fw, fh)
@@ -289,6 +369,16 @@ def run_video_match_tracking(
         else:
             vis = draw_keypoints(frame, kp, sc)
 
+        if writer is None and output_video:
+            h_vis, w_vis = vis.shape[:2]
+            writer = make_video_writer(output_video, fps, (w_vis, h_vis))
+            logging.info("Writing output video to %s", output_video)
+
+        if writer is not None:
+            writer.write(vis)
+
+        save_frame_if_needed(frame_idx, vis, save_frames, frames_dir)
+
         prev_kp = np.copy(kp_np)
         prev_sc = np.copy(sc_np)
         prev_desc = np.copy(desc_np)
@@ -300,6 +390,8 @@ def run_video_match_tracking(
         frame_idx += 1
 
     cap.release()
+    if writer is not None:
+        writer.release()
     cv2.destroyAllWindows()
 
 
@@ -310,12 +402,22 @@ def run_on_video(
     device: torch.device,
     viz_min_dist: float = 0.0,
     viz_max_per_x_column: int = 0,
+    output_video: str | None = None,
+    save_frames: set[int] | None = None,
+    frames_dir: str | None = None,
 ):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise SystemExit(f"Cannot open video: {path}")
 
     logging.info("Press 'q' to quit video")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25.0
+
+    writer = None
+    save_frames = save_frames or set()
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -363,6 +465,16 @@ def run_on_video(
         else:
             vis = vis_kp
 
+        if writer is None and output_video:
+            h_vis, w_vis = vis.shape[:2]
+            writer = make_video_writer(output_video, fps, (w_vis, h_vis))
+            logging.info("Writing output video to %s", output_video)
+
+        if writer is not None:
+            writer.write(vis)
+
+        save_frame_if_needed(frame_idx, vis, save_frames, frames_dir)
+
         cv2.imshow(window_name, vis)
 
         key = cv2.waitKey(1) & 0xFF
@@ -372,6 +484,8 @@ def run_on_video(
         frame_idx += 1
 
     cap.release()
+    if writer is not None:
+        writer.release()
     cv2.destroyAllWindows()
 
 
@@ -392,6 +506,46 @@ def build_model(args, device: torch.device):
     ).eval()
 
     return model
+
+
+def parse_frame_list(text: str) -> set[int]:
+    if not text.strip():
+        return set()
+    out = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.add(int(part))
+    return out
+
+
+def parse_frame_pair(text: str) -> tuple[int, int] | None:
+    if not text.strip():
+        return None
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) != 2:
+        raise SystemExit("--match-video-frames must look like A,B for example 1,5")
+    return int(parts[0]), int(parts[1])
+
+
+def make_video_writer(path: str, fps: float, frame_size: tuple[int, int]) -> cv2.VideoWriter:
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    return cv2.VideoWriter(path, fourcc, fps, frame_size)
+
+
+def save_frame_if_needed(
+    frame_idx: int,
+    frame: np.ndarray,
+    frames_to_save: set[int],
+    frames_dir: str | None,
+) -> None:
+    if frames_dir is None or frame_idx not in frames_to_save:
+        return
+    os.makedirs(frames_dir, exist_ok=True)
+    out_path = os.path.join(frames_dir, f"frame_{frame_idx}.png")
+    cv2.imwrite(out_path, frame)
+    logging.info("Saved frame %d -> %s", frame_idx, out_path)
 
 
 if __name__ == "__main__":
@@ -435,6 +589,13 @@ if __name__ == "__main__":
         help="second image for descriptor matching (mutual NN, Hamming); main input must be an image",
     )
     parser.add_argument(
+        "--match-video-frames",
+        type=str,
+        default="",
+        metavar="A,B",
+        help="for video input: show descriptor matches between two frame indices, e.g. 1,5",
+    )
+    parser.add_argument(
         "--max-hamming",
         type=int,
         default=80,
@@ -445,7 +606,29 @@ if __name__ == "__main__":
         action="store_true",
         help="video only: keypoints/heatmap only, no frame-to-frame descriptor matching (default video: tracks on)",
     )
+    parser.add_argument(
+        "--output-video",
+        type=str,
+        default="",
+        help="save processed video to this file, e.g. output.mp4",
+    )
+    parser.add_argument(
+        "--save-frames",
+        type=str,
+        default="",
+        help="comma-separated frame indices to save, e.g. 1,5,20",
+    )
+    parser.add_argument(
+        "--frames-dir",
+        type=str,
+        default="saved_frames",
+        help="directory where selected frames will be saved",
+    )
     args = parser.parse_args()
+
+    save_frames = parse_frame_list(args.save_frames)
+    output_video = args.output_video if args.output_video else None
+    match_video_frames = parse_frame_pair(args.match_video_frames)
 
     logging.basicConfig(level=logging.INFO)
 
@@ -460,6 +643,9 @@ if __name__ == "__main__":
 
     model = build_model(args, device)
 
+    if args.match and match_video_frames is not None:
+        raise SystemExit("Use either --match for two images or --match-video-frames for a video, not both")
+
     if args.match:
         if not is_image_file(args.input):
             raise SystemExit("--match requires the main input to be an image, not video")
@@ -471,6 +657,18 @@ if __name__ == "__main__":
             model,
             args.input,
             args.match,
+            device,
+            max_hamming=args.max_hamming,
+        )
+    elif match_video_frames is not None:
+        if is_image_file(args.input):
+            raise SystemExit("--match-video-frames requires the main input to be a video, not an image")
+        frame_a, frame_b = match_video_frames
+        run_match_two_video_frames(
+            model,
+            args.input,
+            frame_a,
+            frame_b,
             device,
             max_hamming=args.max_hamming,
         )
@@ -491,6 +689,9 @@ if __name__ == "__main__":
             device,
             viz_min_dist=args.viz_min_dist,
             viz_max_per_x_column=args.viz_max_per_x_column,
+            output_video=output_video,
+            save_frames=save_frames,
+            frames_dir=args.frames_dir,
         )
     else:
         run_video_match_tracking(
@@ -498,4 +699,7 @@ if __name__ == "__main__":
             args.input,
             device,
             max_hamming=args.max_hamming,
+            output_video=output_video,
+            save_frames=save_frames,
+            frames_dir=args.frames_dir,
         )
