@@ -70,7 +70,7 @@ class TorchORBDetector(nn.Module):
         gray = rgb_to_gray(image)
 
         orb_score = self.harris_response(gray)
-        fused = orb_score * heatmap
+        fused = orb_score * (0.5 + heatmap)
         fused = torch.where(fused >= self.score_threshold, fused, torch.zeros_like(fused))
         fused = self.nms(fused)
 
